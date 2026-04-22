@@ -1,5 +1,4 @@
 import io
-import base64
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 import fitz  # PyMuPDF
@@ -15,7 +14,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-#  Custom CSS
+#  CSS
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -38,8 +37,7 @@ html, body, [class*="css"] {
     letter-spacing: -0.02em;
 }
 h1 { font-family: 'Space Mono', monospace !important; color: #f0c040 !important; letter-spacing: -0.04em !important; }
-h2 { font-family: 'Space Mono', monospace !important; color: #e8e4dc !important; font-size: 1.1rem !important; letter-spacing: 0.05em !important; text-transform: uppercase; }
-h3 { font-family: 'DM Sans', sans-serif !important; color: #a8a39a !important; font-weight: 400 !important; font-size: 0.9rem !important; }
+h2 { font-family: 'Space Mono', monospace !important; color: #e8e4dc !important; font-size: 1.1rem !important; text-transform: uppercase; }
 
 .stButton > button {
     background: #f0c040 !important;
@@ -94,7 +92,6 @@ h3 { font-family: 'DM Sans', sans-serif !important; color: #a8a39a !important; f
 }
 .stSuccess { background: #0d2b1a !important; border-left: 3px solid #2ea44f !important; }
 .stInfo    { background: #0d1f2b !important; border-left: 3px solid #2980b9 !important; }
-.stWarning { background: #2b1a0d !important; border-left: 3px solid #e67e22 !important; }
 hr { border-color: #2a2a2a !important; }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: #0f0f0f; }
@@ -106,23 +103,11 @@ hr { border-color: #2a2a2a !important; }
     border-radius: 6px;
     padding: 12px 16px;
     font-family: 'Space Mono', monospace;
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: #a8a39a;
-    line-height: 1.8;
+    line-height: 2;
 }
-.flow-box span.highlight { color: #f0c040; font-weight: 700; }
-.rot-tag {
-    display: inline-block;
-    background: #f0c040;
-    color: #0f0f0f;
-    font-family: 'Space Mono', monospace;
-    font-size: 0.6rem;
-    font-weight: 700;
-    padding: 1px 5px;
-    border-radius: 2px;
-    margin-left: 4px;
-    vertical-align: middle;
-}
+.flow-box .sep { color: #f0c040; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -130,26 +115,32 @@ hr { border-color: #2a2a2a !important; }
 # ─────────────────────────────────────────────
 #  Helpers
 # ─────────────────────────────────────────────
-def pdf_page_to_image(pdf_bytes: bytes, page_index: int, width: int = 400):
-    """Render a single PDF page to a PIL-compatible bytes object."""
+def render_page(pdf_bytes: bytes, page_idx: int, width: int = 460) -> bytes:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page = doc[page_index]
+    page = doc[page_idx]
     zoom = width / page.rect.width
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img_bytes = pix.tobytes("png")
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    img = pix.tobytes("png")
     doc.close()
-    return img_bytes
+    return img
 
 
 def rotate_pdf_bytes(pdf_bytes: bytes, rotation_map: dict) -> bytes:
     reader = PdfReader(io.BytesIO(pdf_bytes))
     writer = PdfWriter()
     for i, page in enumerate(reader.pages):
-        deg = rotation_map.get(i, 0)
-        if deg:
-            page.rotate(deg)
+        if rotation_map.get(i, 0):
+            page.rotate(rotation_map[i])
         writer.add_page(page)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def extract_single_page(pdf_bytes: bytes, page_idx: int) -> bytes:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    writer.add_page(reader.pages[page_idx])
     buf = io.BytesIO()
     writer.write(buf)
     return buf.getvalue()
@@ -157,32 +148,29 @@ def rotate_pdf_bytes(pdf_bytes: bytes, rotation_map: dict) -> bytes:
 
 def merge_pdfs(
     folder1_files: dict,
-    folder2_bytes: bytes,
+    separator_bytes: bytes,
     page_ranges: dict = None,
-    interleave_after: int = 4,
+    sep_file: str = None,
+    sep_page_idx: int = None,
 ) -> bytes:
     """
-    Merge pattern:
-      - First `interleave_after` pages of F1 go straight through
-      - From page (interleave_after + 1) onwards: each F1 page is followed by F2's single page
-
-    Example with interleave_after=4:
-      F1p1, F1p2, F1p3, F1p4, F2p1, F1p5, F2p1, F1p6, F2p1, ...
+    Strict 1:1 interleave, skipping the separator page itself from the F1 sequence:
+      F1_p1 → SEP → F1_p2 → SEP → F1_p3 → SEP → …
     """
     writer = PdfWriter()
     for fname, f1_bytes in folder1_files.items():
         r1 = PdfReader(io.BytesIO(f1_bytes))
-        all_pages = list(r1.pages)
+        all_pages = list(enumerate(r1.pages))
         if page_ranges and fname in page_ranges:
             start, end = page_ranges[fname]
-            pages = all_pages[start:end]
-        else:
-            pages = all_pages
-        for i, p in enumerate(pages):
+            all_pages = [(i, p) for i, p in all_pages if start <= i < end]
+        for i, p in all_pages:
+            # Skip the page that was chosen as the separator
+            if fname == sep_file and i == sep_page_idx:
+                continue
             writer.add_page(p)
-            if i >= interleave_after - 1:
-                f2_r = PdfReader(io.BytesIO(folder2_bytes))
-                writer.add_page(f2_r.pages[0])
+            sep_reader = PdfReader(io.BytesIO(separator_bytes))
+            writer.add_page(sep_reader.pages[0])
     buf = io.BytesIO()
     writer.write(buf)
     return buf.getvalue()
@@ -197,12 +185,10 @@ def get_page_count(pdf_bytes: bytes) -> int:
 # ─────────────────────────────────────────────
 for key, default in [
     ("folder1_files", {}),
-    ("folder2_bytes", None),
-    ("folder2_name", ""),
     ("rotations_f1", {}),
-    ("rotations_f2", {}),
     ("page_ranges_f1", {}),
-    ("interleave_after", 4),
+    ("sep_file", None),
+    ("sep_page_idx", 0),
     ("merged_bytes", None),
 ]:
     if key not in st.session_state:
@@ -216,95 +202,99 @@ with st.sidebar:
     st.markdown("## 📁 PDF Merge Studio")
     st.markdown("---")
 
-    # Folder 1
+    # ── Folder 1 upload ──
     st.markdown("### Folder 1")
-    f1_uploads = st.file_uploader(
+    uploads = st.file_uploader(
         "folder1",
         type="pdf",
         accept_multiple_files=True,
         key="f1_upload",
         label_visibility="collapsed",
     )
-    if f1_uploads:
-        for uf in f1_uploads:
+    if uploads:
+        for uf in uploads:
             if uf.name not in st.session_state.folder1_files:
                 st.session_state.folder1_files[uf.name] = uf.read()
                 st.session_state.rotations_f1[uf.name] = {}
+
     if st.session_state.folder1_files:
-        n_f1 = len(st.session_state.folder1_files)
-        st.caption(f"✅ {n_f1} file(s) loaded")
-        if st.button("🗑 Clear Folder 1", use_container_width=True, key="clear_f1"):
-            st.session_state.folder1_files = {}
-            st.session_state.rotations_f1 = {}
-            st.session_state.page_ranges_f1 = {}
+        st.caption(f"✅ {len(st.session_state.folder1_files)} file(s) loaded")
+        if st.button("🗑 Clear all", use_container_width=True, key="clear_f1"):
+            for k in ("folder1_files", "rotations_f1", "page_ranges_f1"):
+                st.session_state[k] = {}
+            st.session_state.sep_file = None
+            st.session_state.sep_page_idx = 0
+            st.session_state.merged_bytes = None
             st.rerun()
 
     st.markdown("---")
 
-    # Folder 2
-    st.markdown("### Folder 2 — single page")
-    f2_upload = st.file_uploader(
-        "folder2",
-        type="pdf",
-        key="f2_upload",
-        label_visibility="collapsed",
-    )
-    if f2_upload:
-        st.session_state.folder2_bytes = f2_upload.read()
-        st.session_state.folder2_name = f2_upload.name
-        st.session_state.rotations_f2 = {}
-    if st.session_state.folder2_bytes:
-        st.caption(f"✅ {st.session_state.folder2_name}")
-        if st.button("🗑 Clear Folder 2", use_container_width=True, key="clear_f2"):
-            st.session_state.folder2_bytes = None
-            st.session_state.folder2_name = ""
-            st.session_state.rotations_f2 = {}
-            st.rerun()
+    # ── Separator page picker ──
+    st.markdown("### Separator Page")
+    st.caption("This page will be inserted after every Folder 1 page in the merged PDF.")
 
-    st.markdown("---")
+    if st.session_state.folder1_files:
+        file_list = sorted(st.session_state.folder1_files.keys())
 
-    # Merge settings
-    st.markdown("### Merge Settings")
-    st.session_state.interleave_after = st.number_input(
-        "Insert Folder 2 page after every N pages from Folder 1",
-        min_value=1,
-        value=st.session_state.interleave_after,
-        step=1,
-        key="interleave_input",
-        help="First N pages of each Folder 1 file go straight through, then Folder 2 page is inserted after every subsequent Folder 1 page.",
-    )
+        sep_file = st.selectbox(
+            "File",
+            file_list,
+            index=file_list.index(st.session_state.sep_file)
+                  if st.session_state.sep_file in file_list else 0,
+            key="sep_file_sel",
+        )
+        sep_n_pages = get_page_count(st.session_state.folder1_files[sep_file])
+        sep_page_num = st.number_input(
+            "Page number",
+            min_value=1,
+            max_value=sep_n_pages,
+            value=min(st.session_state.sep_page_idx + 1, sep_n_pages),
+            key="sep_page_input",
+        )
+        st.session_state.sep_file = sep_file
+        st.session_state.sep_page_idx = sep_page_num - 1
 
-    # Live flow preview
-    n = st.session_state.interleave_after
-    flow_pages = [f"F1·p{i+1}" for i in range(n)] + ["<span class='highlight'>F2</span>", f"F1·p{n+1}", "<span class='highlight'>F2</span>", f"F1·p{n+2}", "<span class='highlight'>F2</span>", "…"]
-    st.markdown(
-        "<div class='flow-box'>" + " → ".join(flow_pages) + "</div>",
-        unsafe_allow_html=True,
-    )
+        # Preview of separator page
+        sep_img = render_page(
+            st.session_state.folder1_files[sep_file],
+            st.session_state.sep_page_idx,
+            width=220,
+        )
+        st.image(sep_img, caption=f"{sep_file} · page {sep_page_num}", use_container_width=True)
 
-    st.markdown("---")
+        st.markdown("---")
+        st.markdown("**Merge pattern**")
+        st.markdown(
+            "<div class='flow-box'>"
+            "F1·p1 → <span class='sep'>SEP</span> → "
+            "F1·p2 → <span class='sep'>SEP</span> → "
+            "F1·p3 → <span class='sep'>SEP</span> → …"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
-    ready = bool(st.session_state.folder1_files) and bool(st.session_state.folder2_bytes)
-    if ready:
+        st.markdown("---")
         if st.button("⚡ MERGE NOW", use_container_width=True, key="merge_btn"):
             with st.spinner("Merging…"):
                 processed_f1 = {}
                 for fname, fbytes in st.session_state.folder1_files.items():
                     rmap = st.session_state.rotations_f1.get(fname, {})
                     processed_f1[fname] = rotate_pdf_bytes(fbytes, rmap)
-                f2 = rotate_pdf_bytes(
-                    st.session_state.folder2_bytes,
-                    st.session_state.rotations_f2,
+
+                sep_bytes = extract_single_page(
+                    processed_f1[st.session_state.sep_file],
+                    st.session_state.sep_page_idx,
                 )
                 st.session_state.merged_bytes = merge_pdfs(
                     processed_f1,
-                    f2,
+                    sep_bytes,
                     st.session_state.page_ranges_f1,
-                    st.session_state.interleave_after,
+                    sep_file=st.session_state.sep_file,
+                    sep_page_idx=st.session_state.sep_page_idx,
                 )
             st.success("Done!")
     else:
-        st.info("Upload files in both folders to merge.")
+        st.info("Upload files in Folder 1 first.")
 
 
 # ─────────────────────────────────────────────
@@ -319,7 +309,7 @@ TAB_PREVIEW, TAB_MERGE = st.tabs(["🔍  PREVIEW & ROTATE", "📦  MERGED OUTPUT
 #  TAB 1 – Preview & Rotate
 # ═══════════════════════════════════════════════
 with TAB_PREVIEW:
-    if not st.session_state.folder1_files and not st.session_state.folder2_bytes:
+    if not st.session_state.folder1_files:
         st.markdown(
             "<div style='text-align:center;padding:80px 0;color:#3a3a3a;"
             "font-family:Space Mono,monospace;font-size:0.9rem;letter-spacing:0.1em;'>"
@@ -327,167 +317,93 @@ with TAB_PREVIEW:
             unsafe_allow_html=True,
         )
     else:
-        subtab_labels = []
-        if st.session_state.folder1_files:
-            subtab_labels.append("📂 Folder 1")
-        if st.session_state.folder2_bytes:
-            subtab_labels.append("📂 Folder 2")
+        file_list = sorted(st.session_state.folder1_files.keys())
+        selected_file = st.selectbox(
+            "Select PDF to preview / rotate",
+            file_list,
+            key="f1_select",
+        )
 
-        subtabs = st.tabs(subtab_labels)
-        idx = 0
+        if selected_file:
+            pdf_bytes = st.session_state.folder1_files[selected_file]
+            n_pages = get_page_count(pdf_bytes)
+            rmap = st.session_state.rotations_f1.get(selected_file, {})
 
-        # ── Folder 1 ──
-        if st.session_state.folder1_files:
-            with subtabs[idx]:
-                idx += 1
-                file_list = sorted(st.session_state.folder1_files.keys())
-                selected_file = st.selectbox(
-                    "Select PDF",
-                    file_list,
-                    key="f1_select",
-                    label_visibility="collapsed",
+            # File info + page range
+            info_col, range_col = st.columns([2, 3])
+            with info_col:
+                st.markdown(f"**{selected_file}** — {n_pages} page(s)")
+                cur_range = st.session_state.page_ranges_f1.get(selected_file)
+                if cur_range:
+                    st.caption(f"Merge range: pages {cur_range[0]+1}–{cur_range[1]}")
+                else:
+                    st.caption("Merge range: all pages")
+
+            with range_col:
+                pr_s = cur_range[0] + 1 if cur_range else 1
+                pr_e = cur_range[1]     if cur_range else n_pages
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                pr_start = rc1.number_input("From", 1, n_pages, pr_s, key=f"pr_s_{selected_file}")
+                pr_end   = rc2.number_input("To",   1, n_pages, pr_e, key=f"pr_e_{selected_file}")
+                if rc3.button("Set", key=f"pr_set_{selected_file}", use_container_width=True):
+                    if pr_start <= pr_end:
+                        st.session_state.page_ranges_f1[selected_file] = (pr_start - 1, pr_end)
+                        st.rerun()
+                    else:
+                        st.error("From must be ≤ To")
+                if rc4.button("Reset", key=f"pr_rst_{selected_file}", use_container_width=True):
+                    st.session_state.page_ranges_f1.pop(selected_file, None)
+                    st.rerun()
+
+            st.markdown("---")
+
+            col_img, col_ctrl = st.columns([3, 2])
+
+            with col_ctrl:
+                page_num = st.number_input(
+                    "Page to preview",
+                    min_value=1, max_value=n_pages, value=1, key="f1_page"
+                ) - 1
+
+                rotate_by = st.selectbox(
+                    "Rotation",
+                    [0, 90, 180, 270],
+                    key="f1_rot_sel",
+                    format_func=lambda x: f"{x}°",
                 )
 
-                if selected_file:
-                    pdf_bytes = st.session_state.folder1_files[selected_file]
-                    n_pages = get_page_count(pdf_bytes)
-                    rmap = st.session_state.rotations_f1.get(selected_file, {})
+                b1, b2 = st.columns(2)
+                if b1.button("✓ Apply", key="f1_apply", use_container_width=True):
+                    st.session_state.rotations_f1[selected_file][page_num] = rotate_by
+                    st.rerun()
+                if b2.button("↺ Reset", key="f1_reset", use_container_width=True):
+                    st.session_state.rotations_f1[selected_file].pop(page_num, None)
+                    st.rerun()
 
-                    # File info + page range row
-                    info_col, range_col = st.columns([2, 3])
-                    with info_col:
-                        st.markdown(f"**{selected_file}** — {n_pages} page(s)")
-                        cur_range = st.session_state.page_ranges_f1.get(selected_file)
-                        if cur_range:
-                            st.caption(f"Merge range: pages {cur_range[0]+1}–{cur_range[1]}")
-                        else:
-                            st.caption("Merge range: all pages")
-
-                    with range_col:
-                        pr_default_start = cur_range[0] + 1 if cur_range else 1
-                        pr_default_end = cur_range[1] if cur_range else n_pages
-                        rc1, rc2, rc3, rc4 = st.columns([1, 1, 1, 1])
-                        pr_start = rc1.number_input("From", 1, n_pages, pr_default_start, key=f"pr_s_{selected_file}", label_visibility="visible")
-                        pr_end   = rc2.number_input("To",   1, n_pages, pr_default_end,   key=f"pr_e_{selected_file}", label_visibility="visible")
-                        rc3.markdown("&nbsp;", unsafe_allow_html=True)
-                        if rc3.button("Set range", key=f"pr_set_{selected_file}"):
-                            if pr_start <= pr_end:
-                                st.session_state.page_ranges_f1[selected_file] = (pr_start - 1, pr_end)
-                                st.rerun()
-                            else:
-                                st.error("From must be ≤ To")
-                        if rc4.button("All pages", key=f"pr_rst_{selected_file}"):
-                            st.session_state.page_ranges_f1.pop(selected_file, None)
-                            st.rerun()
-
-                    st.markdown("---")
-
-                    # Preview + controls
-                    col_img, col_ctrl = st.columns([3, 2])
-
-                    with col_ctrl:
-                        page_num = st.number_input(
-                            "Page to preview",
-                            min_value=1, max_value=n_pages, value=1, key="f1_page"
-                        ) - 1
-
-                        rotate_by = st.selectbox(
-                            "Rotation",
-                            [0, 90, 180, 270],
-                            key="f1_rot_sel",
-                            format_func=lambda x: f"{x}°",
-                        )
-
-                        b1, b2 = st.columns(2)
-                        if b1.button("✓ Apply", key="f1_apply", use_container_width=True):
-                            st.session_state.rotations_f1[selected_file][page_num] = rotate_by
-                            st.rerun()
-                        if b2.button("↺ Reset", key="f1_reset", use_container_width=True):
-                            st.session_state.rotations_f1[selected_file].pop(page_num, None)
-                            st.rerun()
-
-                        st.markdown("---")
-                        st.markdown("**Rotation map**")
-                        if rmap:
-                            for pg, deg in sorted(rmap.items()):
-                                if deg:
-                                    st.markdown(
-                                        f"<span style='font-family:Space Mono,monospace;font-size:0.8rem;'>"
-                                        f"P{pg+1} → {deg}°</span>",
-                                        unsafe_allow_html=True,
-                                    )
-                            if st.button("🗑 Clear rotations", key="f1_clear_all", use_container_width=True):
-                                st.session_state.rotations_f1[selected_file] = {}
-                                st.rerun()
-                        else:
-                            st.caption("No rotations applied.")
-
-                    with col_img:
-                        cur_rot = rmap.get(page_num, 0)
-                        preview_bytes = rotate_pdf_bytes(pdf_bytes, {page_num: cur_rot})
-                        img = pdf_page_to_image(preview_bytes, page_num, width=480)
-                        caption = f"Page {page_num+1} of {n_pages}"
-                        if cur_rot:
-                            caption += f"  ·  {cur_rot}° rotated"
-                        st.image(img, caption=caption, use_container_width=True)
-
-        # ── Folder 2 ──
-        if st.session_state.folder2_bytes:
-            with subtabs[idx]:
-                pdf_bytes = st.session_state.folder2_bytes
-                n_pages = get_page_count(pdf_bytes)
-                rmap = st.session_state.rotations_f2
-
-                st.markdown(f"**{st.session_state.folder2_name}** — {n_pages} page(s)")
                 st.markdown("---")
-
-                col_img, col_ctrl = st.columns([3, 2])
-
-                with col_ctrl:
-                    page_num = st.number_input(
-                        "Page to preview",
-                        min_value=1, max_value=n_pages, value=1, key="f2_page"
-                    ) - 1
-
-                    rotate_by = st.selectbox(
-                        "Rotation",
-                        [0, 90, 180, 270],
-                        key="f2_rot_sel",
-                        format_func=lambda x: f"{x}°",
-                    )
-
-                    b1, b2 = st.columns(2)
-                    if b1.button("✓ Apply", key="f2_apply", use_container_width=True):
-                        st.session_state.rotations_f2[page_num] = rotate_by
+                st.markdown("**Rotation map**")
+                applied = {pg: deg for pg, deg in rmap.items() if deg}
+                if applied:
+                    for pg, deg in sorted(applied.items()):
+                        st.markdown(
+                            f"<span style='font-family:Space Mono,monospace;font-size:0.8rem;'>"
+                            f"P{pg+1} → {deg}°</span>",
+                            unsafe_allow_html=True,
+                        )
+                    if st.button("🗑 Clear rotations", key="f1_clear_all", use_container_width=True):
+                        st.session_state.rotations_f1[selected_file] = {}
                         st.rerun()
-                    if b2.button("↺ Reset", key="f2_reset", use_container_width=True):
-                        st.session_state.rotations_f2.pop(page_num, None)
-                        st.rerun()
+                else:
+                    st.caption("No rotations applied.")
 
-                    st.markdown("---")
-                    st.markdown("**Rotation map**")
-                    if rmap:
-                        for pg, deg in sorted(rmap.items()):
-                            if deg:
-                                st.markdown(
-                                    f"<span style='font-family:Space Mono,monospace;font-size:0.8rem;'>"
-                                    f"P{pg+1} → {deg}°</span>",
-                                    unsafe_allow_html=True,
-                                )
-                        if st.button("🗑 Clear rotations", key="f2_clear_all", use_container_width=True):
-                            st.session_state.rotations_f2 = {}
-                            st.rerun()
-                    else:
-                        st.caption("No rotations applied.")
-
-                with col_img:
-                    cur_rot = rmap.get(page_num, 0)
-                    preview_bytes = rotate_pdf_bytes(pdf_bytes, {page_num: cur_rot})
-                    img = pdf_page_to_image(preview_bytes, page_num, width=480)
-                    caption = f"Page {page_num+1} of {n_pages}"
-                    if cur_rot:
-                        caption += f"  ·  {cur_rot}° rotated"
-                    st.image(img, caption=caption, use_container_width=True)
+            with col_img:
+                cur_rot = rmap.get(page_num, 0)
+                preview_bytes = rotate_pdf_bytes(pdf_bytes, {page_num: cur_rot})
+                img = render_page(preview_bytes, page_num)
+                caption = f"Page {page_num+1} of {n_pages}"
+                if cur_rot:
+                    caption += f"  ·  {cur_rot}° rotated"
+                st.image(img, caption=caption, use_container_width=True)
 
 
 # ═══════════════════════════════════════════════
@@ -515,18 +431,18 @@ with TAB_MERGE:
         st.download_button(
             label="⬇ DOWNLOAD MERGED PDF",
             data=merged,
-            file_name="final_output.pdf",
+            file_name="merged_output.pdf",
             mime="application/pdf",
             use_container_width=True,
             key="download_btn",
         )
 
         st.markdown("---")
-        st.markdown("#### Preview")
+        st.markdown("#### Preview merged pages")
 
         page_preview = st.number_input(
             "Jump to page", min_value=1, max_value=total_pages, value=1, key="merged_page"
         ) - 1
 
-        img = pdf_page_to_image(merged, page_preview, width=560)
-        st.image(img, caption=f"Page {page_preview+1} of {total_pages}", use_container_width=False)
+        img = render_page(merged, page_preview, width=560)
+        st.image(img, caption=f"Page {page_preview+1} of {total_pages}")
