@@ -1,4 +1,5 @@
 import io
+import zipfile
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 import fitz  # PyMuPDF
@@ -178,6 +179,23 @@ def merge_pdfs(
 
 def get_page_count(pdf_bytes: bytes) -> int:
     return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+
+
+def split_pdf_to_zip(pdf_bytes: bytes, pages_per_split: int) -> bytes:
+    """Split pdf_bytes into chunks of `pages_per_split` pages and return a ZIP."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    total = len(reader.pages)
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for chunk_start in range(0, total, pages_per_split):
+            writer = PdfWriter()
+            for i in range(chunk_start, min(chunk_start + pages_per_split, total)):
+                writer.add_page(reader.pages[i])
+            pdf_buf = io.BytesIO()
+            writer.write(pdf_buf)
+            chunk_num = chunk_start // pages_per_split + 1
+            zf.writestr(f"split_{chunk_num:04d}.pdf", pdf_buf.getvalue())
+    return zip_buf.getvalue()
 
 
 # ─────────────────────────────────────────────
@@ -436,6 +454,32 @@ with TAB_MERGE:
             use_container_width=True,
             key="download_btn",
         )
+
+        st.markdown("---")
+        st.markdown("#### Split & Download")
+
+        pages_per_split = st.radio(
+            "Pages per split",
+            options=[1, 2],
+            format_func=lambda x: f"{x} page per PDF" if x == 1 else f"{x} pages per PDF",
+            horizontal=True,
+            key="split_radio",
+        )
+
+        expected_files = (total_pages + pages_per_split - 1) // pages_per_split
+        st.caption(f"Will produce {expected_files} PDF file(s) → downloaded as a ZIP")
+
+        if st.button("✂ SPLIT & DOWNLOAD", use_container_width=True, key="split_btn"):
+            with st.spinner("Splitting…"):
+                zip_bytes = split_pdf_to_zip(merged, pages_per_split)
+            st.download_button(
+                label=f"⬇ DOWNLOAD ZIP ({expected_files} files)",
+                data=zip_bytes,
+                file_name=f"split_{pages_per_split}page.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="zip_download_btn",
+            )
 
         st.markdown("---")
         st.markdown("#### Preview merged pages")
