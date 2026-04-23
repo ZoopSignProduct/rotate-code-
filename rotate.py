@@ -321,7 +321,7 @@ with st.sidebar:
 st.markdown("# PDF Merge Studio")
 st.markdown("---")
 
-TAB_PREVIEW, TAB_MERGE = st.tabs(["🔍  PREVIEW & ROTATE", "📦  MERGED OUTPUT"])
+TAB_PREVIEW, TAB_MERGE, TAB_SPLIT = st.tabs(["🔍  PREVIEW & ROTATE", "📦  MERGED OUTPUT", "✂  SPLIT PDF"])
 
 # ═══════════════════════════════════════════════
 #  TAB 1 – Preview & Rotate
@@ -490,3 +490,80 @@ with TAB_MERGE:
 
         img = render_page(merged, page_preview, width=560)
         st.image(img, caption=f"Page {page_preview+1} of {total_pages}")
+
+
+# ═══════════════════════════════════════════════
+#  TAB 3 – Split PDF
+# ═══════════════════════════════════════════════
+with TAB_SPLIT:
+    st.markdown("#### Split any PDF into individual files")
+    st.markdown("---")
+
+    # ── Input method ──
+    input_method = st.radio(
+        "How do you want to provide the PDF?",
+        ["Upload a file", "Local file path"],
+        horizontal=True,
+        key="split_input_method",
+    )
+
+    split_pdf_bytes = None
+
+    if input_method == "Upload a file":
+        uploaded = st.file_uploader(
+            "Upload PDF to split",
+            type="pdf",
+            key="split_uploader",
+            label_visibility="collapsed",
+        )
+        if uploaded:
+            split_pdf_bytes = uploaded.read()
+
+    else:
+        file_path = st.text_input(
+            "Enter full file path",
+            placeholder="/Users/yourname/Documents/file.pdf",
+            key="split_filepath",
+        )
+        if file_path:
+            try:
+                with open(file_path, "rb") as f:
+                    split_pdf_bytes = f.read()
+                st.caption(f"✅ File loaded from: {file_path}")
+            except FileNotFoundError:
+                st.error("File not found. Please check the path and try again.")
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+
+    if split_pdf_bytes:
+        split_total_pages = get_page_count(split_pdf_bytes)
+        st.markdown("---")
+
+        sc1, sc2 = st.columns(2)
+        sc1.metric("Total Pages", split_total_pages)
+
+        pages_per_chunk = st.radio(
+            "Pages per split",
+            options=[1, 2],
+            format_func=lambda x: f"{x} page per PDF" if x == 1 else f"{x} pages per PDF",
+            horizontal=True,
+            key="split_pages_radio",
+        )
+
+        expected = (split_total_pages + pages_per_chunk - 1) // pages_per_chunk
+        sc2.metric("Output Files", expected)
+
+        st.caption(f"Splitting into {expected} PDF file(s) of {pages_per_chunk} page(s) each → downloaded as a ZIP")
+
+        if st.button("✂ SPLIT NOW", use_container_width=True, key="split_now_btn"):
+            with st.spinner("Splitting…"):
+                zip_bytes = split_pdf_to_zip(split_pdf_bytes, pages_per_chunk)
+            st.success(f"Done! {expected} file(s) ready.")
+            st.download_button(
+                label=f"⬇ DOWNLOAD ZIP ({expected} files)",
+                data=zip_bytes,
+                file_name=f"split_{pages_per_chunk}page.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="split_zip_btn",
+            )
